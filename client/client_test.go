@@ -144,6 +144,7 @@ var allTests = []func(t *testing.T, sb integration.Sandbox){
 	testFileOpCopyIncludeExclude,
 	testFileOpCopyRm,
 	testFileOpCopyUIDCache,
+	testFileOpCreatedTimeExistingParent,
 	testFileOpInputSwap,
 	testFileOpMkdirMkfile,
 	testFileOpRmWildcard,

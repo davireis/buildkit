@@ -934,3 +934,123 @@ func testWhiteoutParentDir(t *testing.T, sb integration.Sandbox) {
 	_, ok = m["foo/"]
 	require.True(t, ok)
 }
+
+func testFileOpCreatedTimeExistingParent(t *testing.T, sb integration.Sandbox) {
+	requiresLinux(t)
+	c, err := New(sb.Context(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	parentEpoch := time.Unix(1000, 0).UTC()
+	childEpoch := time.Unix(42, 0).UTC()
+
+	src := llb.Scratch().File(
+		llb.Mkfile("/f1.txt", 0644, []byte("one"), llb.WithCreatedTime(parentEpoch)).
+			Mkfile("/f2.txt", 0644, []byte("two"), llb.WithCreatedTime(parentEpoch)),
+	)
+
+	base := llb.Scratch().File(
+		llb.Mkdir("/existing", 0755, llb.WithCreatedTime(parentEpoch)),
+	)
+
+	cases := []struct {
+		name     string
+		st       llb.State
+		expected map[string]time.Time
+	}{
+		{
+			name: "mkdir MakeParents=false",
+			st: base.File(
+				llb.Mkdir("/existing/sub", 0755, llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"existing/":     parentEpoch,
+				"existing/sub/": childEpoch,
+			},
+		},
+		{
+			name: "mkdir MakeParents=true",
+			st: base.File(
+				llb.Mkdir("/existing/a/b", 0755, llb.WithParents(true), llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"existing/":     parentEpoch,
+				"existing/a/":   childEpoch,
+				"existing/a/b/": childEpoch,
+			},
+		},
+		{
+			name: "mkfile",
+			st: base.File(
+				llb.Mkfile("/existing/hello.txt", 0644, []byte("hi"), llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"existing/":          parentEpoch,
+				"existing/hello.txt": childEpoch,
+			},
+		},
+		{
+			name: "symlink",
+			st: base.File(
+				llb.Symlink("target", "/existing/link", llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"existing/":     parentEpoch,
+				"existing/link": childEpoch,
+			},
+		},
+		{
+			name: "copy into existing directory",
+			st: base.File(
+				llb.Copy(src, "/f1.txt", "/existing/", &llb.CopyInfo{CreateDestPath: true}, llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"existing/":       parentEpoch,
+				"existing/f1.txt": childEpoch,
+			},
+		},
+		{
+			name: "chained multi-source copy into new directory",
+			st: llb.Scratch().File(
+				llb.Copy(src, "/f1.txt", "/multi/", &llb.CopyInfo{CreateDestPath: true}, llb.WithCreatedTime(childEpoch)).
+					Copy(src, "/f2.txt", "/multi/", &llb.CopyInfo{CreateDestPath: true}, llb.WithCreatedTime(childEpoch)),
+			),
+			expected: map[string]time.Time{
+				"multi/":       childEpoch,
+				"multi/f1.txt": childEpoch,
+				"multi/f2.txt": childEpoch,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def, err := tc.st.Marshal(sb.Context())
+			require.NoError(t, err)
+
+			out := filepath.Join(t.TempDir(), "out.tar")
+			outW, err := os.Create(out)
+			require.NoError(t, err)
+			defer outW.Close()
+
+			_, err = c.Solve(sb.Context(), def, SolveOpt{
+				Exports: []ExportEntry{{
+					Type:   ExporterTar,
+					Output: fixedWriteCloser(outW),
+				}},
+			}, nil)
+			require.NoError(t, err)
+
+			dt, err := os.ReadFile(out)
+			require.NoError(t, err)
+			m, err := testutil.ReadTarToMap(dt, false)
+			require.NoError(t, err)
+
+			for p, want := range tc.expected {
+				entry, ok := m[p]
+				require.True(t, ok, "entry %q not found in tar", p)
+				require.Equal(t, want.Unix(), entry.Header.ModTime.Unix(), "mtime of %s", p)
+			}
+		})
+	}
+}
